@@ -342,9 +342,12 @@ function filterBody(body, allowedKeys = null) {
 }
 
 function getBearerToken(req) {
-  const header = req.headers.authorization || "";
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
+  const header = req.headers.authorization || req.headers.Authorization || "";
+  if (!header) return null;
+  if (header.toLowerCase().startsWith("bearer ")) {
+    return header.slice(7).trim();
+  }
+  return header.trim();
 }
 
 async function authenticate(req) {
