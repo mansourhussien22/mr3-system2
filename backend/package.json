@@ -1,0 +1,20 @@
+{
+  "name": "mr3-system-vs-project",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MR3 System organized for VS Code with frontend, backend, and database folders.",
+  "scripts": {
+    "start": "node backend/server.cjs",
+    "dev": "node backend/server.cjs",
+    "check": "node --check backend/server.cjs"
+  },
+  "keywords": [
+    "pharmacy",
+    "erp",
+    "pos",
+    "frontend",
+    "backend"
+  ],
+  "author": "MR3",
+  "license": "UNLICENSED"
+}

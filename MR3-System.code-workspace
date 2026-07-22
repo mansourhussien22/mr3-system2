@@ -1,0 +1,24 @@
+{
+  "folders": [
+    {
+      "name": "MR3 Frontend",
+      "path": "frontend"
+    },
+    {
+      "name": "MR3 Backend",
+      "path": "backend"
+    },
+    {
+      "name": "MR3 Database",
+      "path": "database"
+    },
+    {
+      "name": "Docs",
+      "path": "docs"
+    }
+  ],
+  "settings": {
+    "files.encoding": "utf8",
+    "editor.formatOnSave": true
+  }
+}

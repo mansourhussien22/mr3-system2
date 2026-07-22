@@ -1,0 +1,151 @@
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes softFade {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes menuReveal {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes surfaceFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes accentSweep {
+  from {
+    transform: translateX(-45%);
+  }
+  to {
+    transform: translateX(45%);
+  }
+}
+
+@keyframes themePulse {
+  from {
+    filter: saturate(0.82) brightness(0.96);
+  }
+  to {
+    filter: saturate(1) brightness(1);
+  }
+}
+
+@keyframes heroScan {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 120px 0;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.42s ease both;
+}
+
+.toast {
+  animation: toastIn 0.22s ease both;
+}
+
+.panel,
+.stat-card {
+  animation: rise 0.24s ease both;
+}
+
+.modal,
+.app-loader-card {
+  animation: softFade 0.22s ease both;
+}
+
+.nav-group[open] > .nav-group-body {
+  animation: menuReveal 0.18s ease both;
+}
+
+.home-hero,
+.home-live-grid,
+.profile-shell {
+  animation: rise 0.34s ease both;
+}
+
+.home-brand-card {
+  animation: surfaceFloat 4.8s ease-in-out infinite;
+}
+
+.home-avatar-card {
+  animation: surfaceFloat 5.6s ease-in-out infinite;
+}
+
+.login-feature-stack span {
+  animation: rise 0.45s ease both;
+}
+
+.login-feature-stack span:nth-child(2) {
+  animation-delay: 0.08s;
+}
+
+.login-feature-stack span:nth-child(3) {
+  animation-delay: 0.16s;
+}
+
+.theme-toggle-icon {
+  animation: softFade 0.2s ease both;
+}
+
+.home-hero::before {
+  animation: heroScan 12s linear infinite;
+}

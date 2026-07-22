@@ -1,0 +1,24 @@
+{
+  "collections": {
+    "users": "Application users and permissions.",
+    "categories": "Product categories.",
+    "customers": "Customers and balances.",
+    "suppliers": "Suppliers and balances.",
+    "products": "Items, prices, stock, units, barcode, and expiry.",
+    "salesInvoices": "Saved sales invoices.",
+    "purchaseInvoices": "Saved purchase invoices.",
+    "salesReturns": "Sales return documents.",
+    "purchaseReturns": "Purchase return documents.",
+    "movements": "Stock movement report rows.",
+    "payments": "Customer/supplier payments.",
+    "expenses": "Expense records.",
+    "shortages": "Shortage requests.",
+    "inventoryAudits": "Inventory count adjustments and audit report.",
+    "treasuryTransactions": "Manual treasury deposit/withdrawal operations."
+  },
+  "commonFields": {
+    "id": "Unique string id.",
+    "createdAt": "ISO date time.",
+    "updatedAt": "ISO date time."
+  }
+}
