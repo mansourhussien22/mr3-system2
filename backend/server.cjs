@@ -251,6 +251,7 @@ async function getDb() {
           passwordHash,
           passwordSalt,
           role: "admin",
+          permissions: [],
           active: true,
           mustChangePassword: true,
           createdAt: new Date().toISOString(),
@@ -359,7 +360,7 @@ function isAdmin(user) {
   return user && user.role === "admin";
 }
 
-// ------------------------- مسارات ה- API -------------------------
+// ------------------------- مسارات الـ API -------------------------
 async function handleApi(req, res, url, extraHeaders) {
   if (req.method === "OPTIONS") return sendJson(req, res, 204, {}, extraHeaders);
   const parts = url.pathname.split("/").filter(Boolean);
@@ -439,7 +440,7 @@ async function handleApi(req, res, url, extraHeaders) {
       if (!isAdmin(currentUser)) {
         return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
-      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active"]);
+      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
       const errors = validateUserBody(body, true);
       if (errors.length) return sendJson(req, res, 400, { error: "Validation failed", details: errors }, extraHeaders);
 
@@ -452,6 +453,7 @@ async function handleApi(req, res, url, extraHeaders) {
         username: body.username,
         email: body.email,
         name: body.name,
+        permissions: body.permissions || [],
         passwordHash,
         passwordSalt,
         role: (body.role || "user").toLowerCase(),
@@ -479,8 +481,8 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 201, newItem, extraHeaders);
   }
 
-  // 4) PATCH تعديل
-  if (req.method === "PATCH" && id) {
+  // 4) PATCH أو PUT تعديل
+  if ((req.method === "PATCH" || req.method === "PUT") && id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
       if (!isAdmin(currentUser)) {
@@ -489,7 +491,7 @@ async function handleApi(req, res, url, extraHeaders) {
       const index = db.users.findIndex((u) => u.id === id);
       if (index === -1) return sendJson(req, res, 404, { error: "User not found." }, extraHeaders);
 
-      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active"]);
+      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
       const updated = { ...db.users[index], ...body, updatedAt: new Date().toISOString() };
       if (body.password) {
         const { passwordHash, passwordSalt } = await hashPassword(body.password);
