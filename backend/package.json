@@ -16,5 +16,8 @@
     "backend"
   ],
   "author": "MR3",
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@neondatabase/serverless": "^0.10.0"
+  }
 }
