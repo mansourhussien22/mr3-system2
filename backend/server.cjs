@@ -19,6 +19,14 @@ const frontendRoot = process.env.MR3_FRONTEND_PATH
 const port = Number(process.env.PORT || 3000);
 const JWT_SECRET = process.env.JWT_SECRET;
 const FINAL_JWT_SECRET = JWT_SECRET || "dev-insecure-secret-do-not-use-in-production";
+if (!JWT_SECRET) {
+  // تحذير واضح بدل ما السيرفر يشتغل بصمت بسرّ غير آمن في بيئة حقيقية
+  console.warn(
+    "⚠️  تحذير أمني: JWT_SECRET غير موجود في متغيرات البيئة. " +
+    "السيرفر شغال بسرّ افتراضي غير آمن (dev-insecure-secret-do-not-use-in-production). " +
+    "لازم تحدد JWT_SECRET حقيقي قبل الرفع على production."
+  );
+}
 const TOKEN_TTL_SECONDS = Number(process.env.MR3_TOKEN_TTL || 60 * 60 * 8);
 const MAX_BODY_SIZE = Number(process.env.MAX_BODY_SIZE) || 2_000_000;
 
@@ -40,7 +48,10 @@ const mime = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon"
 };
+const COMPRESSIBLE = new Set([".html", ".css", ".js", ".json", ".svg"]);
 const PROTECTED_FIELDS = ["createdAt", "updatedAt", "id"];
+// مفاتيح خطيرة ممكن تستخدم في هجمات Prototype Pollution
+const DANGEROUS_KEYS = ["__proto__", "constructor", "prototype"];
 
 // ------------------------- الاتصال بـ Neon PostgreSQL -------------------------
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -48,12 +59,13 @@ let sql = null;
 if (DATABASE_URL) {
   sql = neon(DATABASE_URL);
 } else {
-  console.warn("⚠️ تحذير: لم يتم العثور على DATABASE_URL الخاص بـ Neon في متغيرات البيئة.");
+  console.warn("⚠️  تحذير: لم يتم العثور على DATABASE_URL الخاص بـ Neon في متغيرات البيئة.");
 }
 
 async function initNeonDb() {
   if (!sql) return;
   try {
+    // إنشاء جدول البيانات العام في Neon لو مش موجود
     await sql`
       CREATE TABLE IF NOT EXISTS app_data (
         key VARCHAR(255) PRIMARY KEY,
@@ -67,11 +79,41 @@ async function initNeonDb() {
   }
 }
 
+// ------------------------- Rate Limiting -------------------------
+const generalLimits = new Map();
+function isGeneralRateLimited(ip) {
+  const now = Date.now();
+  const entry = generalLimits.get(ip);
+  if (!entry || now > entry.resetTime) {
+    generalLimits.set(ip, { count: 1, resetTime: now + GENERAL_RATE_WINDOW_MS });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > GENERAL_MAX_REQUESTS;
+}
+
+const loginAttempts = new Map();
+function isLoginRateLimited(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > LOGIN_MAX_ATTEMPTS;
+}
+
+function clientIp(req) {
+  return (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+}
+
 // ------------------------- Security & CORS Headers -------------------------
 function baseSecurityHeaders() {
   return {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self';",
     "Referrer-Policy": "no-referrer"
   };
 }
@@ -85,8 +127,6 @@ function corsHeaders(req) {
   if (allowedOrigins.length > 0 && origin && allowedOrigins.includes(origin)) {
     headers["access-control-allow-origin"] = origin;
     headers["vary"] = "Origin";
-  } else {
-    headers["access-control-allow-origin"] = "*";
   }
   return headers;
 }
@@ -99,12 +139,22 @@ function apiHeaders(req) {
   };
 }
 
-// ------------------------- Response Helpers -------------------------
+// ------------------------- أدوات الرد (Response Helpers) -------------------------
 async function sendJson(req, res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body, null, 2);
   const headers = { "content-type": "application/json; charset=utf-8", ...extraHeaders };
-  res.writeHead(status, headers);
-  res.end(payload);
+  const acceptEncoding = req.headers["accept-encoding"] || "";
+  if (acceptEncoding.includes("gzip") && payload.length > 1024) {
+    const compressed = await new Promise((resolve, reject) =>
+      zlib.gzip(payload, (err, out) => (err ? reject(err) : resolve(out)))
+    );
+    headers["content-encoding"] = "gzip";
+    res.writeHead(status, headers);
+    res.end(compressed);
+  } else {
+    res.writeHead(status, headers);
+    res.end(payload);
+  }
 }
 
 function readBody(req) {
@@ -115,7 +165,7 @@ function readBody(req) {
       size += chunk.length;
       if (size > MAX_BODY_SIZE) {
         req.destroy();
-        reject(new Error(`Request body exceeds limit.`));
+        reject(new Error(`Request body exceeds limit of ${MAX_BODY_SIZE} bytes.`));
         return;
       }
       body += chunk;
@@ -125,14 +175,14 @@ function readBody(req) {
       try {
         resolve(JSON.parse(body));
       } catch {
-        resolve({});
+        reject(new Error("Invalid JSON body."));
       }
     });
     req.on("error", reject);
   });
 }
 
-// ------------------------- التشفير والتوكن -------------------------
+// ------------------------- التشفير وتوليد التوكن -------------------------
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
   const derived = await scrypt(password, salt, 64);
@@ -146,9 +196,16 @@ async function verifyPassword(password, salt, expectedHashHex) {
   return crypto.timingSafeEqual(derived, expected);
 }
 
+// استخدام crypto.randomInt بدل byte % chars.length لتفادي أي انحياز بسيط (modulo bias)
+function generateSecurePassword(length = 16) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=";
+  return Array.from({ length }, () => chars[crypto.randomInt(chars.length)]).join("");
+}
+
 function stripPassword(user) {
   if (!user) return user;
   const { passwordHash, passwordSalt, ...rest } = user;
+  rest.permissions = Array.isArray(rest.permissions) ? rest.permissions : [];
   return rest;
 }
 
@@ -163,7 +220,14 @@ function base64urlDecode(input) {
 function generateToken(user) {
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
-  const body = base64url(JSON.stringify({ id: user.id, username: user.username, role: user.role, iat: now, exp: now + TOKEN_TTL_SECONDS }));
+  const body = base64url(JSON.stringify({
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    permissions: Array.isArray(user.permissions) ? user.permissions : [],
+    iat: now,
+    exp: now + TOKEN_TTL_SECONDS
+  }));
   const signature = crypto.createHmac("sha256", FINAL_JWT_SECRET).update(`${header}.${body}`).digest("base64url");
   return `${header}.${body}.${signature}`;
 }
@@ -185,14 +249,17 @@ function verifyToken(token) {
   return payload;
 }
 
-// ------------------------- DB Neon Operations -------------------------
+// ------------------------- التعامل مع قاعدة بيانات Neon -------------------------
 async function getDb() {
   if (!sql) return { users: [], auditLogs: [] };
   try {
     const result = await sql`SELECT data FROM app_data WHERE key = 'main_db'`;
-    if (result.length > 0) return result[0].data;
-
-    const { passwordHash, passwordSalt } = await hashPassword("admin123456");
+    if (result.length > 0) {
+      return result[0].data;
+    }
+    // إنشاء الحساب الافتراضي إذا كانت الداتابيز جديدة تماماً
+    const defaultPassword = generateSecurePassword(16);
+    const { passwordHash, passwordSalt } = await hashPassword(defaultPassword);
     const initialDb = {
       users: [
         {
@@ -205,6 +272,7 @@ async function getDb() {
           role: "admin",
           permissions: [],
           active: true,
+          mustChangePassword: true,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         }
@@ -212,6 +280,9 @@ async function getDb() {
       auditLogs: []
     };
     await writeDbRaw(initialDb);
+    // ملاحظة أمنية: بنطبع الباسورد الافتراضي مرة واحدة فقط عند أول إنشاء للداتابيز
+    // فضّل تغييره فورًا وتتأكد إن الـ logs بتاعتك مش بتتسرب لأي طرف تالت
+    console.log(`🔐 تم إنشاء حساب admin افتراضي في Neon. Password: ${defaultPassword}`);
     return initialDb;
   } catch (err) {
     console.error("❌ خطأ قراءة من Neon:", err);
@@ -238,18 +309,59 @@ function makeId(prefix = "item") {
   return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
 }
 
+function recordAudit(db, action, user, details) {
+  if (!Array.isArray(db.auditLogs)) db.auditLogs = [];
+  const entry = {
+    id: `audit_${crypto.randomUUID()}`,
+    action,
+    performedBy: user ? `${user.username || user.email} (${user.id})` : "SYSTEM",
+    details,
+    createdAt: new Date().toISOString()
+  };
+  db.auditLogs.push(entry);
+}
+
+function validateUserBody(body, isCreation = true) {
+  const errors = [];
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (isCreation) {
+    if (!body.username && !body.email) {
+      errors.push("Username or Email is required.");
+    }
+    if (body.email && !emailRegex.test(body.email)) {
+      errors.push("Invalid email format.");
+    }
+  } else {
+    if (body.email !== undefined && body.email !== "" && !emailRegex.test(body.email)) {
+      errors.push("Invalid email format.");
+    }
+  }
+  return errors;
+}
+
+// دالة فلترة آمنة: لو مفيش allowedKeys بنبني كائن جديد يدويًا بدل Object.assign
+// عشان نمنع Prototype Pollution (مثلاً لو الـ body فيه مفتاح "__proto__")
 function filterBody(body, allowedKeys = null) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return {};
-  const clean = {};
-  if (allowedKeys && Array.isArray(allowedKeys)) {
-    for (const key of allowedKeys) if (body[key] !== undefined) clean[key] = body[key];
-  } else {
-    Object.assign(clean, body);
+  const clean = Object.create(null); // كائن مالوش prototype من الأساس
+
+  const sourceKeys = allowedKeys && Array.isArray(allowedKeys)
+    ? allowedKeys
+    : Object.keys(body);
+
+  for (const key of sourceKeys) {
+    if (DANGEROUS_KEYS.includes(key)) continue; // تجاهل أي مفتاح خطير
+    if (body[key] !== undefined) clean[key] = body[key];
   }
+
   for (const field of PROTECTED_FIELDS) delete clean[field];
   delete clean.passwordHash;
   delete clean.passwordSalt;
-  return clean;
+
+  // نرجع كائن عادي (فيه Object.prototype الطبيعي) عشان يتصرف زي أي object تاني
+  // في باقي الكود (JSON.stringify, spread, ...) من غير مفاجآت
+  return { ...clean };
 }
 
 function getBearerToken(req) {
@@ -258,56 +370,108 @@ function getBearerToken(req) {
   return match ? match[1] : null;
 }
 
+// authenticate بترجع دلوقتي { user, db } سوا، عشان مانحتاجش نجيب الداتابيز
+// مرة تانية بعد كده في نفس الـ request
 async function authenticate(req) {
   const token = getBearerToken(req);
   const payload = token && verifyToken(token);
-  if (!payload) return null;
+  if (!payload) return { user: null, db: null };
+
   const db = await getDb();
-  return db.users.find((u) => u.id === payload.id) || null;
+  const user = db.users.find((u) => u.id === payload.id);
+  if (user && user.active !== false) return { user, db };
+  return { user: null, db };
 }
 
-// ------------------------- API Handler -------------------------
+// requireAuth بترجع { user, db } لو نجح التحقق، أو null لو فشل (وبترد بـ 401 لوحدها)
+async function requireAuth(req, res, extraHeaders) {
+  const { user, db } = await authenticate(req);
+  if (!user) {
+    await sendJson(req, res, 401, { error: "Unauthorized. Please login." }, extraHeaders);
+    return null;
+  }
+  return { user, db };
+}
+
+function isAdmin(user) {
+  return user && user.role === "admin";
+}
+
+// ------------------------- مسارات الـ API -------------------------
 async function handleApi(req, res, url, extraHeaders) {
   if (req.method === "OPTIONS") return sendJson(req, res, 204, {}, extraHeaders);
+
+  // Rate limiting عام على كل مسارات الـ API (كانت الدالة معرّفة ومش مستخدمة)
+  const ip = clientIp(req);
+  if (isGeneralRateLimited(ip)) {
+    return sendJson(req, res, 429, { error: "طلبات كتير جدًا. حاول تاني بعد شوية." }, extraHeaders);
+  }
+
   const parts = url.pathname.split("/").filter(Boolean);
 
   if (url.pathname === "/api/health") {
-    return sendJson(req, res, 200, { ok: true, service: "MR3 backend" }, extraHeaders);
+    return sendJson(req, res, 200, { ok: true, service: "MR3 backend connected to Neon DB" }, extraHeaders);
   }
 
-  // تسجيل الدخول
+  // ---------- تسجيل الدخول ----------
   if (url.pathname === "/api/auth/login" && req.method === "POST") {
+    if (isLoginRateLimited(ip)) {
+      return sendJson(req, res, 429, { error: "محاولات كتير جدًا. حاول تاني بعد شوية." }, extraHeaders);
+    }
     const body = await readBody(req);
     const { username, password } = body;
+    if (!username || !password) {
+      return sendJson(req, res, 400, { error: "Username and password are required." }, extraHeaders);
+    }
     const db = await getDb();
     const user = db.users.find((u) => u.username === username || u.email === username);
-    
-    if (!user || !(await verifyPassword(password, user.passwordSalt, user.passwordHash))) {
-      return sendJson(req, res, 401, { error: "اسم المستخدم أو كلمة المرور غير صحيحة" }, extraHeaders);
+    const dummySalt = "0".repeat(32);
+    const dummyHash = "0".repeat(128);
+    const valid = user
+      ? await verifyPassword(password, user.passwordSalt, user.passwordHash)
+      : await verifyPassword(password, dummySalt, dummyHash);
+
+    if (!user || !valid) {
+      return sendJson(req, res, 401, { error: "Invalid credentials." }, extraHeaders);
+    }
+    if (user.active === false) {
+      return sendJson(req, res, 403, { error: "Account is deactivated. Contact admin." }, extraHeaders);
     }
 
     const token = generateToken(user);
     return sendJson(req, res, 200, { token, user: stripPassword(user) }, extraHeaders);
   }
 
-  const currentUser = await authenticate(req);
+  // ---------- المستخدم الحالي ----------
+  if (url.pathname === "/api/auth/me" && req.method === "GET") {
+    const auth = await requireAuth(req, res, extraHeaders);
+    if (!auth) return;
+    return sendJson(req, res, 200, stripPassword(auth.user), extraHeaders);
+  }
+
+  // ---------- باقي العمليات ----------
   const collection = parts[1];
   const id = parts[2];
+  if (!collection) return sendJson(req, res, 400, { error: "Collection is required." }, extraHeaders);
 
-  if (!collection) return sendJson(req, res, 400, { error: "Collection required." }, extraHeaders);
+  const auth = await requireAuth(req, res, extraHeaders);
+  if (!auth) return;
+  const { user: currentUser, db } = auth; // نفس الـ db اللي اتجابت وقت التحقق من التوكن، من غير استعلام إضافي
 
-  const db = await getDb();
-  if (!(collection in db)) db[collection] = [];
+  if (!(collection in db)) {
+    if (req.method === "GET") return sendJson(req, res, 200, [], extraHeaders);
+  }
 
   // 1) GET قائمة
   if (req.method === "GET" && !id) {
     const rows = Array.isArray(db[collection]) ? db[collection] : [];
-    return sendJson(req, res, 200, collection === "users" ? rows.map(stripPassword) : rows, extraHeaders);
+    const safeRows = collection === "users" ? rows.map(stripPassword) : rows;
+    return sendJson(req, res, 200, safeRows, extraHeaders);
   }
 
   // 2) GET عنصر واحد
   if (req.method === "GET" && id) {
-    const item = db[collection].find((x) => x.id === id);
+    const item = Array.isArray(db[collection]) ? db[collection].find((x) => x.id === id) : null;
     if (!item) return sendJson(req, res, 404, { error: "Item not found." }, extraHeaders);
     return sendJson(req, res, 200, collection === "users" ? stripPassword(item) : item, extraHeaders);
   }
@@ -316,85 +480,134 @@ async function handleApi(req, res, url, extraHeaders) {
   if (req.method === "POST" && !id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
-      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
-      let passwordHash = "", passwordSalt = "";
-      if (body.password) {
-        const h = await hashPassword(body.password);
-        passwordHash = h.passwordHash;
-        passwordSalt = h.passwordSalt;
+      if (!isAdmin(currentUser)) {
+        return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
+      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
+      const errors = validateUserBody(body, true);
+      if (errors.length) return sendJson(req, res, 400, { error: "Validation failed", details: errors }, extraHeaders);
+
+      const username = body.username || (body.email ? body.email.split("@")[0] : `user_${Date.now()}`);
+      const email = body.email || `${username}@mr3.local`;
+
+      if (db.users.some((u) => u.username === username || u.email === email)) {
+        return sendJson(req, res, 409, { error: "Username or email already exists." }, extraHeaders);
+      }
+      const { passwordHash, passwordSalt } = await hashPassword(body.password || "12345678");
       const newUser = {
         id: makeId("u"),
-        username: body.username || `user_${Date.now()}`,
-        email: body.email || "",
-        name: body.name || body.username || "مستخدم",
+        username: username,
+        email: email,
+        name: body.name || username,
         permissions: Array.isArray(body.permissions) ? body.permissions : [],
         passwordHash,
         passwordSalt,
-        role: body.role || "user",
+        role: (body.role || "user").toLowerCase(),
         active: body.active !== undefined ? body.active : true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
       db.users.push(newUser);
+      recordAudit(db, "USER_CREATED", currentUser, { targetId: newUser.id, username: newUser.username });
       await writeDbRaw(db);
       return sendJson(req, res, 201, stripPassword(newUser), extraHeaders);
     }
 
-    const newItem = { id: makeId(collection.slice(0, 3)), ...filterBody(rawBody), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const cleanData = filterBody(rawBody);
+    const newItem = {
+      id: cleanData.id || makeId(collection.slice(0, 3)),
+      ...cleanData,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!Array.isArray(db[collection])) db[collection] = [];
     db[collection].push(newItem);
+    recordAudit(db, `${collection.toUpperCase()}_CREATED`, currentUser, { id: newItem.id });
     await writeDbRaw(db);
     return sendJson(req, res, 201, newItem, extraHeaders);
   }
 
-  // 4) PUT أو PATCH تعديل (يدعم الحفظ وتحديث الصلاحيات بمرونة)
+  // 4) PATCH أو PUT تعديل
   if ((req.method === "PATCH" || req.method === "PUT") && id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
+      if (!isAdmin(currentUser)) {
+        return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
+      }
       const index = db.users.findIndex((u) => u.id === id);
       if (index === -1) return sendJson(req, res, 404, { error: "User not found." }, extraHeaders);
 
       const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
       const updated = { ...db.users[index], ...body, updatedAt: new Date().toISOString() };
-      
+
+      if (body.permissions !== undefined) {
+        updated.permissions = Array.isArray(body.permissions) ? body.permissions : [];
+      }
+
       if (body.password) {
         const { passwordHash, passwordSalt } = await hashPassword(body.password);
         updated.passwordHash = passwordHash;
         updated.passwordSalt = passwordSalt;
       }
       delete updated.password;
-
       db.users[index] = updated;
+      recordAudit(db, "USER_UPDATED", currentUser, { targetId: id });
       await writeDbRaw(db);
       return sendJson(req, res, 200, stripPassword(updated), extraHeaders);
     }
 
-    const items = db[collection] || [];
+    const items = Array.isArray(db[collection]) ? db[collection] : [];
     const index = items.findIndex((x) => x.id === id);
     if (index === -1) return sendJson(req, res, 404, { error: "Item not found." }, extraHeaders);
 
-    const updated = { ...items[index], ...filterBody(rawBody), updatedAt: new Date().toISOString() };
+    const cleanData = filterBody(rawBody);
+    const updated = { ...items[index], ...cleanData, updatedAt: new Date().toISOString() };
     db[collection][index] = updated;
+    recordAudit(db, `${collection.toUpperCase()}_UPDATED`, currentUser, { id });
     await writeDbRaw(db);
     return sendJson(req, res, 200, updated, extraHeaders);
   }
 
   // 5) DELETE حذف
   if (req.method === "DELETE" && id) {
-    if (collection === "users") db.users = db.users.filter((u) => u.id !== id);
-    else db[collection] = db[collection].filter((x) => x.id !== id);
-    await writeDbRaw(db);
-    return sendJson(req, res, 200, { ok: true, message: "Deleted successfully." }, extraHeaders);
+    if (collection === "users") {
+      if (!isAdmin(currentUser)) {
+        return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
+      }
+      db.users = db.users.filter((u) => u.id !== id);
+      recordAudit(db, "USER_DELETED", currentUser, { targetId: id });
+      await writeDbRaw(db);
+      return sendJson(req, res, 200, { ok: true, message: "User deleted successfully." }, extraHeaders);
+    }
+
+    if (Array.isArray(db[collection])) {
+      db[collection] = db[collection].filter((x) => x.id !== id);
+      recordAudit(db, `${collection.toUpperCase()}_DELETED`, currentUser, { id });
+      await writeDbRaw(db);
+      return sendJson(req, res, 200, { ok: true, message: "Item deleted successfully." }, extraHeaders);
+    }
   }
 
   return sendJson(req, res, 405, { error: "Method not allowed." }, extraHeaders);
 }
 
-// ------------------------- static files -------------------------
+// ------------------------- تشغيل السيرفر -------------------------
 const fs = require("fs").promises;
+
 async function handleStatic(req, res, corsAndSecurityHeaders) {
   const clean = decodeURIComponent((req.url || "/").split("?")[0]).replace(/^\/+/, "") || "login.html";
   const full = path.resolve(frontendRoot, clean);
+
+  // حماية من Path Traversal: نتأكد إن المسار النهائي لسه جوه frontendRoot
+  // (مهم خصوصًا لو حد بعت مسار فيه "../" عشان يوصل لملفات بره مجلد الفرونت اند)
+  const isInsideFrontend =
+    full === frontendRoot || full.startsWith(frontendRoot + path.sep);
+
+  if (!isInsideFrontend) {
+    res.writeHead(403, { "content-type": "text/plain; charset=utf-8", ...corsAndSecurityHeaders });
+    return res.end("Forbidden");
+  }
+
   try {
     let target = full;
     const stat = await fs.stat(target).catch(() => null);
@@ -402,7 +615,12 @@ async function handleStatic(req, res, corsAndSecurityHeaders) {
 
     const data = await fs.readFile(target);
     const ext = path.extname(target).toLowerCase();
-    res.writeHead(200, { "content-type": mime[ext] || "application/octet-stream", ...corsAndSecurityHeaders });
+    const headers = {
+      "content-type": mime[ext] || "application/octet-stream",
+      "cache-control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+      ...corsAndSecurityHeaders
+    };
+    res.writeHead(200, headers);
     res.end(data);
   } catch {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8", ...corsAndSecurityHeaders });
@@ -413,6 +631,7 @@ async function handleStatic(req, res, corsAndSecurityHeaders) {
 const server = http.createServer(async (req, res) => {
   const security = baseSecurityHeaders();
   const cors = corsHeaders(req);
+
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
     if (url.pathname === "/") {
@@ -422,12 +641,15 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith("/api")) return await handleApi(req, res, url, apiHeaders(req));
     return await handleStatic(req, res, { ...security, ...cors });
   } catch (error) {
+    console.error(`[Error] Unhandled server error:`, error);
     return sendJson(req, res, 500, { error: "Internal server error." }, { ...security, ...cors });
   }
 });
 
 initNeonDb().then(() => {
-  server.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+  server.listen(port, () => {
+    console.log(`🚀 Server running on port ${port} connected to Neon DB`);
+  });
 });
 
 module.exports = server;
