@@ -126,7 +126,7 @@ function corsHeaders(req) {
     headers["access-control-allow-origin"] = origin;
     headers["vary"] = "Origin";
   } else if (origin) {
-    headers["access-control-allow-origin"] = origin; // السماح تلقائياً لتسهيل طلبات CORS
+    headers["access-control-allow-origin"] = origin;
   }
   return headers;
 }
@@ -260,7 +260,7 @@ async function getDb() {
       if (!Array.isArray(dbData.auditLogs)) dbData.auditLogs = [];
       return dbData;
     }
-    
+
     const defaultPassword = generateSecurePassword(16);
     const { passwordHash, passwordSalt } = await hashPassword(defaultPassword);
     const initialDb = {
@@ -448,36 +448,44 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 200, collection === "users" ? stripPassword(item) : item, extraHeaders);
   }
 
-  // 3) POST Create
+  // 3) POST Create (معالجة مرنة مخصصة للمستخدمين)
   if (req.method === "POST" && !id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
       if (!isAdmin(currentUser)) {
         return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
-      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
-      
-      const username = body.username || (body.email ? body.email.split("@")[0] : `user_${Date.now()}`);
-      const email = body.email || `${username}@mr3.local`;
 
-      // التحقق من عدم التكرار
-      if (db.users.some((u) => u.username.toLowerCase() === username.toLowerCase() || u.email.toLowerCase() === email.toLowerCase())) {
-        return sendJson(req, res, 409, { error: "Username or email already exists." }, extraHeaders);
+      const username = rawBody.username || rawBody.userName || (rawBody.email ? rawBody.email.split("@")[0] : `user_${Date.now()}`);
+      const email = rawBody.email || rawBody.userEmail || `${username}@mr3.local`;
+      const name = rawBody.name || rawBody.fullName || username;
+      const role = (rawBody.role || "user").toLowerCase();
+      const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : [];
+
+      const isDuplicate = db.users.some(
+        (u) => u.username?.toLowerCase() === username.toLowerCase() || u.email?.toLowerCase() === email.toLowerCase()
+      );
+
+      if (isDuplicate) {
+        return sendJson(req, res, 409, { error: "اسم المستخدم أو البريد الإلكتروني مسجل بالفعل." }, extraHeaders);
       }
 
-      const passToHash = body.password && body.password.trim().length > 0 ? body.password : "12345678";
+      const passToHash = rawBody.password && String(rawBody.password).trim().length > 0 
+        ? String(rawBody.password) 
+        : "12345678";
+        
       const { passwordHash, passwordSalt } = await hashPassword(passToHash);
       
       const newUser = {
         id: makeId("u"),
-        username: username,
-        email: email,
-        name: body.name || username,
-        permissions: Array.isArray(body.permissions) ? body.permissions : [],
+        username,
+        email,
+        name,
+        role,
+        permissions,
         passwordHash,
         passwordSalt,
-        role: (body.role || "user").toLowerCase(),
-        active: body.active !== undefined ? body.active : true,
+        active: rawBody.active !== undefined ? Boolean(rawBody.active) : true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
@@ -485,6 +493,7 @@ async function handleApi(req, res, url, extraHeaders) {
       db.users.push(newUser);
       recordAudit(db, "USER_CREATED", currentUser, { targetId: newUser.id, username: newUser.username });
       await writeDbRaw(db);
+      
       return sendJson(req, res, 201, stripPassword(newUser), extraHeaders);
     }
 
@@ -512,23 +521,29 @@ async function handleApi(req, res, url, extraHeaders) {
       const index = db.users.findIndex((u) => u.id === id);
       if (index === -1) return sendJson(req, res, 404, { error: "User not found." }, extraHeaders);
 
-      const body = filterBody(rawBody, ["username", "email", "password", "name", "role", "active", "permissions"]);
-      
-      // التنسيق مع الإبقاء على القيم السابقة إذا كانت المدخلات فارغة
-      const updated = { 
-        ...db.users[index], 
-        ...body, 
-        permissions: body.permissions !== undefined ? (Array.isArray(body.permissions) ? body.permissions : []) : db.users[index].permissions,
-        updatedAt: new Date().toISOString() 
+      const username = rawBody.username || rawBody.userName || db.users[index].username;
+      const email = rawBody.email || rawBody.userEmail || db.users[index].email;
+      const name = rawBody.name || rawBody.fullName || db.users[index].name;
+      const role = rawBody.role ? String(rawBody.role).toLowerCase() : db.users[index].role;
+      const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : db.users[index].permissions;
+
+      const updated = {
+        ...db.users[index],
+        username,
+        email,
+        name,
+        role,
+        permissions,
+        active: rawBody.active !== undefined ? Boolean(rawBody.active) : db.users[index].active,
+        updatedAt: new Date().toISOString()
       };
 
-      if (body.password && body.password.trim().length > 0) {
-        const { passwordHash, passwordSalt } = await hashPassword(body.password);
+      if (rawBody.password && String(rawBody.password).trim().length > 0) {
+        const { passwordHash, passwordSalt } = await hashPassword(String(rawBody.password));
         updated.passwordHash = passwordHash;
         updated.passwordSalt = passwordSalt;
       }
-      delete updated.password;
-      
+
       db.users[index] = updated;
       recordAudit(db, "USER_UPDATED", currentUser, { targetId: id });
       await writeDbRaw(db);
@@ -570,7 +585,7 @@ async function handleApi(req, res, url, extraHeaders) {
   return sendJson(req, res, 405, { error: "Method not allowed." }, extraHeaders);
 }
 
-// ------------------------- handleStatic & Static Files -------------------------
+// ------------------------- Static Files Handling -------------------------
 async function handleStatic(req, res, corsAndSecurityHeaders) {
   const clean = decodeURIComponent((req.url || "/").split("?")[0]).replace(/^\/+/, "") || "login.html";
   const full = path.resolve(frontendRoot, clean);
