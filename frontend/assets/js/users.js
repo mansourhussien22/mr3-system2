@@ -4,11 +4,9 @@
   // لتجنب تحميل كل المستخدمين في الذاكرة عند التعداد الكبير.
   // =============================================
   function duplicate(data, id) {
-    // Normalize to avoid case-sensitive duplicates
     const normalizedEmail = MR3Utils.normalize(data.email || '');
     const normalizedUsername = MR3Utils.normalize(data.username || '');
 
-    // Early exit if no data to compare
     if (!normalizedEmail && !normalizedUsername) return false;
 
     return MR3DB.all("users").some((user) => {
@@ -32,10 +30,8 @@
         input.checked = true;   // الأدمن يملك كل الصلاحيات
         input.disabled = true;  // تعطيل التعديل عليه
       } else {
+        input.checked = false;  // 🔥 إلغاء التحديد فوراً عند التحويل إلى USER
         input.disabled = false; // تفعيل التعديل للمستخدم العادي
-        // [أمان] إذا كان المستخدم عادي، لا نترك أي صلاحية محددة افتراضياً 
-        // (المستخدم سيحدد ما يحتاجه بنفسه، وهذا يمنع تسريب صلاحيات الأدمن)
-        input.checked = false; 
       }
     });
 
@@ -46,8 +42,8 @@
         masterCheckbox.indeterminate = false;
         masterCheckbox.disabled = true;
       } else {
-        masterCheckbox.checked = false;
-        masterCheckbox.indeterminate = false;
+        masterCheckbox.checked = false;      // 🔥 إلغاء تحديد master
+        masterCheckbox.indeterminate = false; // 🔥 إزالة حالة غير محددة
         masterCheckbox.disabled = false;
       }
     }
@@ -57,22 +53,15 @@
     if (!MR3App.require("users.manage")) return;
     const isEdit = Boolean(user);
 
-    // =============================================
-    // إنشاء حقول الصلاحيات مع تعطيلها إذا كان الأدمن
-    // =============================================
     const isAdminUser = user?.role === "ADMIN";
     const permissionBoxes = MR3Permissions.all
       .map((permission) => {
-        // في حالة التعديل على أدمن، نضع checked ونعطله
         const checked = isAdminUser || (user?.permissions || []).includes(permission) ? " checked" : "";
         const disabled = isAdminUser ? " disabled" : "";
         return `<label class="checkbox-line"><input type="checkbox" name="permissions" value="${MR3Utils.escape(permission)}"${checked}${disabled} /><span>${MR3Utils.escape(MR3Permissions.label(permission))}</span></label>`;
       })
       .join("");
 
-    // =============================================
-    // إضافة autocomplete و minlength للباسورد
-    // =============================================
     const body = `<form id="userForm" class="modal-form form-grid" novalidate>
       <label class="field"><span>${MR3I18n.t("common.name")}</span><input name="name" value="${MR3Utils.escape(user?.name || "")}" required /></label>
       <label class="field"><span>${MR3I18n.t("common.username")}</span><input name="username" value="${MR3Utils.escape(user?.username || "")}" required /></label>
@@ -111,7 +100,6 @@
     // وظائف التحكم في Master والمربعات
     // =============================================
     const syncMaster = () => {
-      // إذا كان master معطلاً (في حالة الأدمن) لا نعدل حالته
       if (master.disabled) return;
       const inputs = permissionInputs();
       const checked = inputs.filter((input) => input.checked).length;
@@ -120,7 +108,6 @@
     };
 
     const setAllPermissions = (checked) => {
-      // لا نعدل على الصلاحيات إذا كانت معطلة (حالة الأدمن)
       const inputs = permissionInputs();
       const isDisabled = inputs.length > 0 && inputs[0].disabled;
       if (isDisabled) return;
@@ -137,37 +124,29 @@
     modal.querySelectorAll("[data-permission-all]").forEach((button) => button.addEventListener("click", () => setAllPermissions(true)));
     modal.querySelectorAll("[data-permission-none]").forEach((button) => button.addEventListener("click", () => setAllPermissions(false)));
     
-    // عند تغيير master
     master.addEventListener("change", () => {
       if (master.disabled) return;
       setAllPermissions(master.checked);
     });
 
-    // ربط التغيير على كل صندوق صلاحية
     permissionInputs().forEach((input) => input.addEventListener("change", syncMaster));
     
     // =============================================
-    // [الأهم] تفعيل التفاعل عند تغيير الدور (Role)
+    // تفعيل التفاعل عند تغيير الدور (Role)
     // =============================================
     roleSelect.addEventListener("change", function () {
       const selectedRole = this.value;
-      // تحديث واجهة الصلاحيات حسب الدور الجديد
       updatePermissionsUI(form, selectedRole, master);
-      // مزامنة الـ Master بعد التحديث
-      if (selectedRole !== "ADMIN") {
-        // إذا كان User، نضمن أن الـ Master يعكس الوضع الجديد (غير محدد)
-        master.checked = false;
-        master.indeterminate = false;
-      }
+      syncMaster();
     });
 
-    // التهيئة الأولية بناءً على الدور الحالي (إن وجد)
+    // التهيئة الأولية
     const initialRole = roleSelect.value;
     updatePermissionsUI(form, initialRole, master);
-    syncMaster(); // للتأكد من حالة الـ Master في وضع USER
+    syncMaster();
 
     // =============================================
-    // حدث إرسال النموذج (Submit)
+    // حدث إرسال النموذج (Submit) - [تم التصليح النهائي]
     // =============================================
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -179,39 +158,36 @@
       const data = Object.fromEntries(new FormData(form).entries());
       data.active = data.active === "true";
       
-      // =============================================
-      // [طبقة أمان نهائية] منع تسريب صلاحيات الأدمن للمستخدم العادي
-      // =============================================
+      // قراءة الصلاحيات المحددة فعلياً من الـ checkboxes
+      const selectedPermissions = Array.from(
+        form.querySelectorAll("input[name='permissions']:checked")
+      ).map((input) => input.value);
+
+      // حفظ الصلاحيات بالشكل الصحيح
       if (data.role === "ADMIN") {
         data.permissions = MR3Permissions.all.slice();
       } else {
-        // إذا كان USER، نلغي أي صلاحيات قد تكون تم حقنها عبر الـ DevTools
-        data.permissions = [];
+        // 🔥 طبقة أمان إضافية: لا نسمح للمستخدم العادي بإرسال صلاحيات غير مدرجة في القائمة الأساسية
+        const allowedPermissions = MR3Permissions.all;
+        data.permissions = selectedPermissions.filter(p => allowedPermissions.includes(p));
+        // إذا كنت لا تريد أي صلاحيات للمستخدم العادي، يمكنك جعلها [] مباشرة، لكن هنا نترك المرونة.
       }
 
-      // التحقق من صحة الباسورد (على الأقل 6 حروف)
       if (data.password && data.password.length < 6) {
         MR3Utils.toast("error", MR3I18n.t("messages.failed"), "كلمة المرور يجب أن تكون 6 أحرف على الأقل.");
         return;
       }
 
-      // حماية كلمة المرور عند التعديل: إذا لم يكتب العميل كلمة مرور جديدة، لا نرسل هذا الحقل
       if (isEdit && !data.password) {
         delete data.password;
       }
 
-      // التحقق من التكرار
       if (duplicate(data, user?.id)) {
         MR3Utils.toast("error", MR3I18n.t("messages.failed"), MR3I18n.t("messages.duplicateUser"));
         return;
       }
 
       try {
-        // =============================================
-        // [تنبيه أمني خطير] 
-        // العمليات التالية (MR3DB.update/insert) يجب أن تتم عبر Backend (API) فقط!
-        // لأن العميل غير موثوق ويمكنه تزوير البيانات بسهولة.
-        // =============================================
         if (isEdit) {
           await MR3DB.update("users", user.id, data);
         } else {
@@ -221,8 +197,7 @@
         MR3Utils.closeModal();
         MR3App.render();
       } catch (error) {
-        // [تحسين] عدم عرض تفاصيل الخطأ التقنية للمستخدم (لأسباب أمنية)
-        console.error("DB Error:", error); // تسجيل الخطأ في الكونسول للمطور
+        console.error("DB Error:", error);
         MR3Utils.toast("error", MR3I18n.t("messages.failed"), MR3I18n.t("messages.errorOccurred") || "حدث خطأ داخلي، حاول مرة أخرى.");
       }
     });
@@ -270,10 +245,10 @@
   }
 
   // =============================================
-  // عرض الجدول مع تحسين الأداء (تخزين المستخدمين مؤقتاً)
+  // عرض الجدول
   // =============================================
   function table() {
-    const users = MR3DB.all("users"); // قراءة مرة واحدة فقط
+    const users = MR3DB.all("users");
     
     return `<div class="table-wrap"><table class="data-table"><thead><tr><th>${MR3I18n.t("common.name")}</th><th>${MR3I18n.t("common.email")}</th><th>${MR3I18n.t("common.role")}</th><th>${MR3I18n.t("common.status")}</th><th>${MR3I18n.t("common.actions")}</th></tr></thead><tbody>
       ${users.map((user) => `<tr data-id="${user.id}"><td>${MR3Utils.escape(user.name)}</td><td>${MR3Utils.escape(user.email)}</td><td>${MR3Utils.badge(user.role === "ADMIN" ? MR3I18n.t("common.admin") : MR3I18n.t("common.user"), user.role === "ADMIN" ? "violet" : "info")}</td><td>${MR3Utils.badge(user.active ? MR3I18n.t("common.active") : MR3I18n.t("common.inactive"), user.active ? "success" : "danger")}</td><td><div class="table-actions">
