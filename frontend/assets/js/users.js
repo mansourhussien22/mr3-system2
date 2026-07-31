@@ -1,17 +1,24 @@
 (function () {
-  // دالة المساعد لإرسال التوكن مع كل الطلبات
+  // 1) دالة المساعد لإرسال التوكن مع كل الطلبات
   function getAuthHeaders() {
-    const token = localStorage.getItem("token") || sessionStorage.getItem("token");
+    const token = 
+      localStorage.getItem("token") || 
+      sessionStorage.getItem("token") ||
+      localStorage.getItem("mr3_token") ||
+      sessionStorage.getItem("mr3_token");
+
     return {
       'Content-Type': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     };
   }
 
-  // جديد: تسجيل خروج فوري ونظيف لما الجلسة تبقى غير صالحة (توكن منتهي/باظ/يوزر معطل)
+  // 2) تسجيل خروج فوري ونظيف لما الجلسة تبقى غير صالحة
   function forceLogout(message) {
     localStorage.removeItem("token");
     sessionStorage.removeItem("token");
+    localStorage.removeItem("mr3_token");
+    sessionStorage.removeItem("mr3_token");
 
     const text = message || "انتهت صلاحية جلستك، من فضلك سجل الدخول مرة أخرى.";
     if (window.MR3Utils && typeof MR3Utils.toast === "function") {
@@ -20,14 +27,12 @@
       alert(text);
     }
 
-    // تأخير بسيط عشان المستخدم يشوف رسالة التنبيه قبل التحويل
     setTimeout(() => {
       window.location.href = "/login.html";
     }, 800);
   }
 
-  // جديد: غلاف مركزي فوق fetch بيضيف التوكن تلقائيًا،
-  // وبيتعامل مع 401 في مكان واحد بدل ما يتكرر في كل دالة
+  // 3) غلاف مركزي فوق fetch
   async function apiFetch(url, options = {}) {
     const response = await fetch(url, {
       ...options,
@@ -46,23 +51,19 @@
         // تجاهل لو الرد مش JSON
       }
 
-      // لو التوكن أصلاً مش موجود من البداية (مثلاً اتمسح)، أو انتهى، أو الحساب اتعطل
-      // كل الحالات دي معناها إن الجلسة خلصت ولازم تسجيل دخول جديد
       forceLogout(
         reason === "expired"
           ? "انتهت صلاحية جلستك، من فضلك سجل الدخول مرة أخرى."
           : "الجلسة غير صالحة، من فضلك سجل الدخول مرة أخرى."
       );
 
-      // بنرمي error عشان أي كود بعد الـ await يوقف تنفيذه فورًا
-      // ومايكملش يحاول يتعامل مع رد فاشل وكأنه نجح
       throw new Error("SESSION_EXPIRED");
     }
 
     return response;
   }
 
-  // دالة لجلب المستخدمين من السيرفر مع التوكن
+  // 4) دالة لجلب المستخدمين من السيرفر مع التوكن
   async function fetchUsers() {
     try {
       const response = await apiFetch('/api/users');
@@ -70,12 +71,13 @@
       return await response.json();
     } catch (error) {
       if (error.message !== "SESSION_EXPIRED") {
-        console.error(error);
+        console.error("Fetch Users Error:", error);
       }
       return [];
     }
   }
 
+  // 5) فحص التكرار (Duplicate Check)
   function duplicate(users, data, id) {
     const normalizedEmail = MR3Utils.normalize(data.email || '');
     const normalizedUsername = MR3Utils.normalize(data.username || '');
@@ -83,10 +85,11 @@
     if (!normalizedEmail && !normalizedUsername) return false;
 
     return users.some((user) => {
-      if (user.id === id) return false;
+      // تحويل الـ IDs لملازمة المقارنة النصية السليمة
+      if (String(user.id) === String(id)) return false;
       return (
-        MR3Utils.normalize(user.email) === normalizedEmail ||
-        MR3Utils.normalize(user.username) === normalizedUsername
+        (normalizedEmail && MR3Utils.normalize(user.email || '') === normalizedEmail) ||
+        (normalizedUsername && MR3Utils.normalize(user.username || '') === normalizedUsername)
       );
     });
   }
@@ -121,7 +124,6 @@
     const userRole = String(user?.role || "USER").toUpperCase();
     const isAdminUser = userRole === "ADMIN";
 
-    // تحديد النص مباشرة بناءً على اللغة
     const optionalText = MR3I18n.current() === "ar" ? "اختياري" : "Optional";
 
     const permissionBoxes = MR3Permissions.all
@@ -225,15 +227,14 @@
         data.permissions = selectedPermissions.filter(p => MR3Permissions.all.includes(p));
       }
 
-      if (data.password && data.password.length < 6) {
+      // إزالة كلمة المرور الفارغة عند التعديل حتى لا ترسل فارغة للباك إند
+      if (isEdit && (!data.password || data.password.trim() === "")) {
+        delete data.password;
+      } else if (data.password && data.password.length < 6) {
         MR3Utils.toast("error", MR3I18n.t("messages.failed"), "كلمة المرور يجب أن تكون 6 أحرف على الأقل.");
         saveBtn.disabled = false;
         saveBtn.innerHTML = `${MR3Utils.icon("save")}${MR3I18n.t("common.save")}`;
         return;
-      }
-
-      if (isEdit && !data.password) {
-        delete data.password;
       }
 
       try {
@@ -262,12 +263,12 @@
         MR3Utils.closeModal();
         MR3Pages.users.render(document.getElementById('mainContent') || document.body);
       } catch (error) {
-        // لو الجلسة انتهت، apiFetch بالفعل عمل تحويل لصفحة اللوجين، فمفيش داعي نعرض توست تاني
         if (error.message === "SESSION_EXPIRED") return;
         console.error("Server Error:", error);
         MR3Utils.toast("error", MR3I18n.t("messages.failed"), error.message || MR3I18n.t("messages.errorOccurred"));
       } finally {
         saveBtn.disabled = false;
+        saveBtn.innerHTML = `${MR3Utils.icon("save")}${MR3I18n.t("common.save")}`;
       }
     });
   }
@@ -275,7 +276,7 @@
   async function deleteUser(id) {
     if (!MR3App.require("users.manage")) return;
     const currentUser = MR3App.user();
-    if (id === currentUser?.id) {
+    if (String(id) === String(currentUser?.id)) {
       MR3Utils.toast("error", MR3I18n.t("messages.failed"), MR3I18n.t("messages.permissionDenied"));
       return;
     }
@@ -298,22 +299,28 @@
     if (!MR3App.require("users.manage")) return;
 
     const users = await fetchUsers();
-    const user = users.find(u => u.id === id);
+    const user = users.find(u => String(u.id) === String(id));
     if (!user) return;
 
-    if (user.id === MR3App.user()?.id) {
+    if (String(user.id) === String(MR3App.user()?.id)) {
       MR3Utils.toast("error", MR3I18n.t("messages.failed"), "لا يمكن تعطيل حسابك الحالي.");
       return;
     }
 
     try {
-      // إرسال البيانات المحدثة مع الحفاظ على البيانات القديمة للمستخدم
+      // إرسال الحقول المطلوبة فقط وتجنب إرسال password فارغ
+      const payload = {
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        permissions: user.permissions || [],
+        active: !user.active
+      };
+
       const response = await apiFetch(`/api/users/${id}`, {
         method: 'PUT',
-        body: JSON.stringify({
-          ...user,
-          active: !user.active
-        })
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) throw new Error('فشل التحديث');
@@ -330,10 +337,14 @@
   async function table() {
     const users = await fetchUsers();
 
+    if (!users || users.length === 0) {
+      return `<div class="table-wrap" style="text-align:center; padding: 20px;">لا يوجد مستخدمون حالياً.</div>`;
+    }
+
     return `<div class="table-wrap"><table class="data-table"><thead><tr><th>${MR3I18n.t("common.name")}</th><th>${MR3I18n.t("common.email")}</th><th>${MR3I18n.t("common.role")}</th><th>${MR3I18n.t("common.status")}</th><th>${MR3I18n.t("common.actions")}</th></tr></thead><tbody>
       ${users.map((user) => {
         const isAdmin = String(user.role).toUpperCase() === "ADMIN";
-        return `<tr data-id="${user.id}"><td>${MR3Utils.escape(user.name)}</td><td>${MR3Utils.escape(user.email)}</td><td>${MR3Utils.badge(isAdmin ? MR3I18n.t("common.admin") : MR3I18n.t("common.user"), isAdmin ? "violet" : "info")}</td><td>${MR3Utils.badge(user.active ? MR3I18n.t("common.active") : MR3I18n.t("common.inactive"), user.active ? "success" : "danger")}</td><td><div class="table-actions">
+        return `<tr data-id="${user.id}"><td>${MR3Utils.escape(user.name || '')}</td><td>${MR3Utils.escape(user.email || '')}</td><td>${MR3Utils.badge(isAdmin ? MR3I18n.t("common.admin") : MR3I18n.t("common.user"), isAdmin ? "violet" : "info")}</td><td>${MR3Utils.badge(user.active ? MR3I18n.t("common.active") : MR3I18n.t("common.inactive"), user.active ? "success" : "danger")}</td><td><div class="table-actions">
         ${MR3Utils.actionButton("edit", "edit", MR3I18n.t("common.edit"))}
         ${MR3Utils.actionButton("toggle", "refresh", user.active ? MR3I18n.t("common.inactive") : MR3I18n.t("common.active"), "icon-button warning-button")}
         ${MR3Utils.actionButton("delete", "trash", MR3I18n.t("common.delete"), "icon-button danger-button")}
@@ -342,19 +353,22 @@
     </tbody></table></div>`;
   }
 
+  window.MR3Pages = window.MR3Pages || {};
   window.MR3Pages.users = {
     async render(root) {
       root.innerHTML = MR3App.pageHeader("nav.users", "", `<button id="addUser" class="primary-button">${MR3Utils.icon("plus")}${MR3I18n.t("common.add")}</button>`) + `<section class="panel"><div class="panel-body"><div style="text-align:center; padding: 20px;">جاري تحميل المستخدمين...</div></div></section>`;
 
       const tableHtml = await table();
-      root.querySelector(".panel-body").innerHTML = tableHtml;
+      const panelBody = root.querySelector(".panel-body");
+      if (panelBody) panelBody.innerHTML = tableHtml;
 
-      root.querySelector("#addUser").addEventListener("click", () => openForm());
+      const addBtn = root.querySelector("#addUser");
+      if (addBtn) addBtn.addEventListener("click", () => openForm());
 
       MR3App.bindTableActions(root, {
         edit: async (id) => {
           const users = await fetchUsers();
-          openForm(users.find(u => u.id === id));
+          openForm(users.find(u => String(u.id) === String(id)));
         },
         delete: deleteUser,
         toggle: toggleUser
