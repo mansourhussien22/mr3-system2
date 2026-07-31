@@ -1,8 +1,36 @@
 (function () {
-  const PERMISSIONS = MR3Seed.ALL_PERMISSIONS;
+  // 1️⃣ إعداد قائمة الصلاحيات الشاملة كـ Fallback في حال عدم وجود MR3Seed
+  const DEFAULT_PERMISSIONS = [
+    "dashboard.view",
+    "products.view", "products.create", "products.update", "products.delete",
+    "categories.view", "categories.create", "categories.update", "categories.delete",
+    "sales.view", "sales.create", "sales.update", "sales.delete",
+    "purchases.view", "purchases.create", "purchases.update", "purchases.delete",
+    "salesReturns.view", "salesReturns.create",
+    "purchaseReturns.view", "purchaseReturns.create",
+    "customers.view", "customers.create", "customers.update", "customers.delete",
+    "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete",
+    "inventory.view", "inventory.adjust", "inventory.movement", "inventory.audit",
+    "shortages.view", "shortages.create", "shortages.update", "shortages.delete",
+    "payments.view", "payments.create",
+    "expenses.view", "expenses.create", "expenses.update", "expenses.delete",
+    "reports.view",
+    "users.manage",
+    "settings.manage",
+    "customerService.view", "customerService.create", "customerService.update",
+    "reservations.view", "reservations.create", "reservations.update",
+    "notifications.view",
+    "treasury.view", "treasury.create",
+    "settlements.view"
+  ];
+
+  // تأمين جلب الصلاحيات سواء كانت في Seed أو القائمة التخلفية
+  const PERMISSIONS = (typeof MR3Seed !== "undefined" && Array.isArray(MR3Seed.ALL_PERMISSIONS)) 
+    ? MR3Seed.ALL_PERMISSIONS 
+    : DEFAULT_PERMISSIONS;
 
   const permissionLabels = {
-    "dashboard.view": ["View home", "عرض الهوم"],
+    "dashboard.view": ["View home", "عرض الرئيسية"],
     "products.view": ["View products", "عرض الأصناف"],
     "products.create": ["Create products", "إضافة أصناف"],
     "products.update": ["Update products", "تعديل الأصناف"],
@@ -34,6 +62,7 @@
     "inventory.view": ["View inventory", "عرض المخزون"],
     "inventory.adjust": ["Adjust inventory", "تعديل المخزون"],
     "inventory.movement": ["View item movement", "عرض حركة الأصناف"],
+    "inventory.audit": ["Inventory audit", "جرد وتسوية المخزون"],
     "shortages.view": ["View shortages", "عرض النواقص"],
     "shortages.create": ["Create shortages", "إضافة نواقص"],
     "shortages.update": ["Update shortages", "تعديل النواقص"],
@@ -46,11 +75,7 @@
     "expenses.delete": ["Delete expenses", "حذف المصروفات"],
     "reports.view": ["View reports", "عرض التقارير"],
     "users.manage": ["Manage users", "إدارة المستخدمين"],
-    "settings.manage": ["Manage settings", "إدارة الإعدادات"]
-  };
-
-  Object.assign(permissionLabels, {
-    "inventory.audit": ["Inventory audit", "جرد وتسوية المخزون"],
+    "settings.manage": ["Manage settings", "إدارة الإعدادات"],
     "customerService.view": ["View customer service", "عرض خدمة العملاء"],
     "customerService.create": ["Create customer requests", "إنشاء طلبات خدمة العملاء"],
     "customerService.update": ["Update customer requests", "تعديل طلبات خدمة العملاء"],
@@ -61,26 +86,50 @@
     "treasury.view": ["View treasury", "عرض الخزنة"],
     "treasury.create": ["Create treasury deposits and withdrawals", "إضافة صرف وتوريد"],
     "settlements.view": ["View stock settlements", "عرض تسويات المخزون"]
-  });
+  };
 
   function label(permission) {
     const item = permissionLabels[permission] || [permission, permission];
-    return MR3I18n.isArabic() ? item[1] : item[0];
+    // التحقق بأمان من اللغات
+    const isAr = typeof MR3I18n !== "undefined" && typeof MR3I18n.isArabic === "function" ? MR3I18n.isArabic() : true;
+    return isAr ? item[1] : item[0];
   }
 
   function has(user, permission) {
-    if (!user || !user.active) return false;
-    if (user.role === "ADMIN") return true;
-    return (user.permissions || []).includes(permission);
+    if (!user) return false;
+    
+    // عدم الرفض إلا إذا كانت active معرّفة صراحة بـ false
+    if (user.active === false) return false;
+
+    // توحيد فحص الأدوار بحروف كبيرة
+    const role = String(user.role || "").toUpperCase();
+    if (role === "ADMIN") return true;
+
+    // فحص الصلاحيات للمستخدم العادي
+    const perms = Array.isArray(user.permissions) ? user.permissions : [];
+    return perms.includes(permission);
   }
 
   function require(permission) {
-    if (!has(MR3Auth.currentUser(), permission)) {
-      MR3Utils.toast("error", MR3I18n.t("messages.failed"), MR3I18n.t("messages.permissionDenied"));
+    const currentUser = (typeof MR3Auth !== "undefined" && typeof MR3Auth.currentUser === "function") 
+      ? MR3Auth.currentUser() 
+      : (typeof MR3App !== "undefined" && typeof MR3App.user === "function" ? MR3App.user() : null);
+
+    if (!has(currentUser, permission)) {
+      if (typeof MR3Utils !== "undefined" && MR3Utils.toast) {
+        MR3Utils.toast("error", "خطأ", "ليس لديك صلاحية للوصول لهذه الدالة.");
+      } else {
+        alert("ليس لديك صلاحية للوصول لهذه الدالة.");
+      }
       return false;
     }
     return true;
   }
 
-  window.MR3Permissions = { all: PERMISSIONS, label, has, require };
+  window.MR3Permissions = { 
+    all: PERMISSIONS, 
+    label, 
+    has, 
+    require 
+  };
 })();
