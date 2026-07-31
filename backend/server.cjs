@@ -222,7 +222,7 @@ function generateToken(user) {
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
   const body = base64url(JSON.stringify({
-    id: user.id,
+    id: String(user.id),
     username: user.username,
     role: String(user.role || "USER").toUpperCase(),
     permissions: Array.isArray(user.permissions) ? user.permissions : [],
@@ -369,15 +369,15 @@ function getBearerToken(req) {
 
 async function authenticate(req) {
   const token = getBearerToken(req);
-  if (!token) return { user: null, db: null, reason: "missing_token" };
+  if (!token) return { user: null, db: null, reason: "unauthorized" };
 
   const { payload, reason } = verifyToken(token);
-  if (!payload) return { user: null, db: null, reason: reason || "invalid_token" };
+  if (!payload) return { user: null, db: null, reason: reason || "unauthorized" };
 
   const db = await getDb();
-  const user = db.users.find((u) => u.id === payload.id);
+  const user = db.users.find((u) => String(u.id) === String(payload.id));
 
-  if (!user) return { user: null, db: null, reason: "user_not_found" };
+  if (!user) return { user: null, db: null, reason: "unauthorized" };
   if (user.active === false) return { user: null, db: null, reason: "account_deactivated" };
 
   return { user, db, reason: null };
@@ -436,7 +436,7 @@ async function handleApi(req, res, url, extraHeaders) {
       : await verifyPassword(password, dummySalt, dummyHash);
 
     if (!user || !valid) {
-      return sendJson(req, res, 401, { error: "Invalid credentials." }, extraHeaders);
+      return sendJson(req, res, 401, { error: "Invalid credentials.", reason: "unauthorized" }, extraHeaders);
     }
     if (user.active === false) {
       return sendJson(req, res, 403, { error: "Account is deactivated. Contact admin." }, extraHeaders);
@@ -474,12 +474,12 @@ async function handleApi(req, res, url, extraHeaders) {
 
   // 2) GET Single Item
   if (req.method === "GET" && id) {
-    const item = Array.isArray(db[collection]) ? db[collection].find((x) => x.id === id) : null;
+    const item = Array.isArray(db[collection]) ? db[collection].find((x) => String(x.id) === String(id)) : null;
     if (!item) return sendJson(req, res, 404, { error: "Item not found." }, extraHeaders);
     return sendJson(req, res, 200, collection === "users" ? stripPassword(item) : item, extraHeaders);
   }
 
-  // 3) POST Create (إضافة مستخدم أو عنصر مع معالجة التكرار)
+  // 3) POST Create (إضافة مستخدم أو عنصر)
   if (req.method === "POST" && !id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
@@ -542,14 +542,14 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 201, newItem, extraHeaders);
   }
 
-  // 4) PATCH or PUT Update (تعديل مستخدم مع التحقق المتقدم لمنع التكرار مع مستخدمين آخرين)
+  // 4) PATCH or PUT Update (تعديل مستخدم مع عدم طلب كلمة المرور إذا كانت فارغة)
   if ((req.method === "PATCH" || req.method === "PUT") && id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
       if (!isAdmin(currentUser)) {
         return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
-      const index = db.users.findIndex((u) => u.id === id);
+      const index = db.users.findIndex((u) => String(u.id) === String(id));
       if (index === -1) return sendJson(req, res, 404, { error: "User not found." }, extraHeaders);
 
       const username = (rawBody.username || rawBody.userName || db.users[index].username).trim();
@@ -558,9 +558,9 @@ async function handleApi(req, res, url, extraHeaders) {
       const role = rawBody.role ? String(rawBody.role).toUpperCase() : db.users[index].role;
       const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : db.users[index].permissions;
 
-      // التأكد أن الاسم أو الإيميل الجديد مش مستخدم في حساب تاني غير الحساب ده
+      // التأكد أن الاسم أو الإيميل الجديد غير مستخدم في حساب آخر
       const isDuplicateOther = db.users.some(
-        (u) => u.id !== id && (u.username?.toLowerCase() === username.toLowerCase() || u.email?.toLowerCase() === email.toLowerCase())
+        (u) => String(u.id) !== String(id) && (u.username?.toLowerCase() === username.toLowerCase() || u.email?.toLowerCase() === email.toLowerCase())
       );
 
       if (isDuplicateOther) {
@@ -578,6 +578,7 @@ async function handleApi(req, res, url, extraHeaders) {
         updatedAt: new Date().toISOString()
       };
 
+      // تحديث كلمة المرور فقط في حال وجود نص غير فارغ
       if (rawBody.password && String(rawBody.password).trim().length > 0) {
         const { passwordHash, passwordSalt } = await hashPassword(String(rawBody.password));
         updated.passwordHash = passwordHash;
@@ -591,7 +592,7 @@ async function handleApi(req, res, url, extraHeaders) {
     }
 
     const items = Array.isArray(db[collection]) ? db[collection] : [];
-    const index = items.findIndex((x) => x.id === id);
+    const index = items.findIndex((x) => String(x.id) === String(id));
     if (index === -1) return sendJson(req, res, 404, { error: "Item not found." }, extraHeaders);
 
     const cleanData = filterBody(rawBody);
@@ -608,14 +609,20 @@ async function handleApi(req, res, url, extraHeaders) {
       if (!isAdmin(currentUser)) {
         return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
-      db.users = db.users.filter((u) => u.id !== id);
+      
+      // منع حذف حساب المستخدم الحالي
+      if (String(currentUser.id) === String(id)) {
+        return sendJson(req, res, 403, { error: "لا يمكنك حذف حسابك الحالي" }, extraHeaders);
+      }
+
+      db.users = db.users.filter((u) => String(u.id) !== String(id));
       recordAudit(db, "USER_DELETED", currentUser, { targetId: id });
       await writeDbRaw(db);
       return sendJson(req, res, 200, { ok: true, message: "User deleted successfully." }, extraHeaders);
     }
 
     if (Array.isArray(db[collection])) {
-      db[collection] = db[collection].filter((x) => x.id !== id);
+      db[collection] = db[collection].filter((x) => String(x.id) !== String(id));
       recordAudit(db, `${collection.toUpperCase()}_DELETED`, currentUser, { id });
       await writeDbRaw(db);
       return sendJson(req, res, 200, { ok: true, message: "Item deleted successfully." }, extraHeaders);
