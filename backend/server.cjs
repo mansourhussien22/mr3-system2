@@ -223,7 +223,7 @@ function generateToken(user) {
   const body = base64url(JSON.stringify({
     id: user.id,
     username: user.username,
-    role: user.role,
+    role: String(user.role || "USER").toUpperCase(),
     permissions: Array.isArray(user.permissions) ? user.permissions : [],
     iat: now,
     exp: now + TOKEN_TTL_SECONDS
@@ -272,7 +272,7 @@ async function getDb() {
           email: "admin@mr3.local",
           passwordHash,
           passwordSalt,
-          role: "admin",
+          role: "ADMIN",
           permissions: [],
           active: true,
           mustChangePassword: true,
@@ -371,7 +371,7 @@ async function requireAuth(req, res, extraHeaders) {
 }
 
 function isAdmin(user) {
-  return user && user.role === "admin";
+  return user && String(user.role).toUpperCase() === "ADMIN";
 }
 
 // ------------------------- مسارات الـ API -------------------------
@@ -451,7 +451,7 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 200, collection === "users" ? stripPassword(item) : item, extraHeaders);
   }
 
-  // 3) POST Create (معالجة مرنة مخصصة للمستخدمين)
+  // 3) POST Create (معالجة مرنة ومصححة للمستخدمين والصلاحيات)
   if (req.method === "POST" && !id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
@@ -462,7 +462,7 @@ async function handleApi(req, res, url, extraHeaders) {
       const username = rawBody.username || rawBody.userName || (rawBody.email ? rawBody.email.split("@")[0] : `user_${Date.now()}`);
       const email = rawBody.email || rawBody.userEmail || `${username}@mr3.local`;
       const name = rawBody.name || rawBody.fullName || username;
-      const role = (rawBody.role || "user").toLowerCase();
+      const role = String(rawBody.role || "USER").toUpperCase();
       const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : [];
 
       const isDuplicate = db.users.some(
@@ -527,7 +527,7 @@ async function handleApi(req, res, url, extraHeaders) {
       const username = rawBody.username || rawBody.userName || db.users[index].username;
       const email = rawBody.email || rawBody.userEmail || db.users[index].email;
       const name = rawBody.name || rawBody.fullName || db.users[index].name;
-      const role = rawBody.role ? String(rawBody.role).toLowerCase() : db.users[index].role;
+      const role = rawBody.role ? String(rawBody.role).toUpperCase() : db.users[index].role;
       const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : db.users[index].permissions;
 
       const updated = {
