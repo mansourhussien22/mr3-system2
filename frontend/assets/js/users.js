@@ -1,8 +1,19 @@
 (function () {
-  // دالة لجلب المستخدمين من السيرفر
+  // دالة المساعد لإرسال التوكن مع كل الطلبات
+  function getAuthHeaders() {
+    const token = localStorage.getItem("token") || sessionStorage.getItem("token");
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+  }
+
+  // دالة لجلب المستخدمين من السيرفر مع التوكن
   async function fetchUsers() {
     try {
-      const response = await fetch('/api/users');
+      const response = await fetch('/api/users', {
+        headers: getAuthHeaders()
+      });
       if (!response.ok) throw new Error('فشل جلب المستخدمين');
       return await response.json();
     } catch (error) {
@@ -28,14 +39,13 @@
 
   function updatePermissionsUI(form, role, masterCheckbox) {
     const inputs = form.querySelectorAll("input[name='permissions']");
-    const isAdmin = role === "ADMIN";
+    const isAdmin = String(role).toUpperCase() === "ADMIN";
 
     inputs.forEach((input) => {
       if (isAdmin) {
         input.checked = true;
         input.disabled = true;
       } else {
-        input.checked = false;
         input.disabled = false;
       }
     });
@@ -46,8 +56,6 @@
         masterCheckbox.indeterminate = false;
         masterCheckbox.disabled = true;
       } else {
-        masterCheckbox.checked = false;
-        masterCheckbox.indeterminate = false;
         masterCheckbox.disabled = false;
       }
     }
@@ -56,9 +64,10 @@
   async function openForm(user) {
     if (!MR3App.require("users.manage")) return;
     const isEdit = Boolean(user);
-    const isAdminUser = user?.role === "ADMIN";
+    const userRole = String(user?.role || "USER").toUpperCase();
+    const isAdminUser = userRole === "ADMIN";
     
-    // إصلاح مشكلة الترجمة: تحديد النص مباشرة بناء على اللغة
+    // تحديد النص مباشرة بناءً على اللغة
     const optionalText = MR3I18n.current() === "ar" ? "اختياري" : "Optional";
 
     const permissionBoxes = MR3Permissions.all
@@ -79,7 +88,7 @@
         <input name="password" type="password" autocomplete="new-password" minlength="6" ${isEdit ? "" : "required"} placeholder="${isEdit ? "••••••••" : ""}" />
       </label>
 
-      <label class="field"><span>${MR3I18n.t("common.role")}</span><select name="role" id="roleSelect"><option value="USER"${user?.role !== "ADMIN" ? " selected" : ""}>${MR3I18n.t("common.user")}</option><option value="ADMIN"${user?.role === "ADMIN" ? " selected" : ""}>${MR3I18n.t("common.admin")}</option></select></label>
+      <label class="field"><span>${MR3I18n.t("common.role")}</span><select name="role" id="roleSelect"><option value="USER"${userRole !== "ADMIN" ? " selected" : ""}>${MR3I18n.t("common.user")}</option><option value="ADMIN"${userRole === "ADMIN" ? " selected" : ""}>${MR3I18n.t("common.admin")}</option></select></label>
       <label class="field"><span>${MR3I18n.t("common.status")}</span><select name="active"><option value="true"${user?.active !== false ? " selected" : ""}>${MR3I18n.t("common.active")}</option><option value="false"${user?.active === false ? " selected" : ""}>${MR3I18n.t("common.inactive")}</option></select></label>
       
       <div class="wide" id="permissionsSection">
@@ -150,6 +159,7 @@
 
       const data = Object.fromEntries(new FormData(form).entries());
       data.active = data.active === "true";
+      data.role = String(data.role).toUpperCase();
       
       const selectedPermissions = Array.from(
         form.querySelectorAll("input[name='permissions']:checked")
@@ -186,18 +196,21 @@
         
         const response = await fetch(url, {
           method: method,
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify(data)
         });
 
-        if (!response.ok) throw new Error('فشل الحفظ في السيرفر');
+        if (!response.ok) {
+          const errRes = await response.json().catch(() => ({}));
+          throw new Error(errRes.error || 'فشل الحفظ في السيرفر');
+        }
 
         MR3Utils.toast("success", MR3I18n.t("messages.success"), MR3I18n.t("messages.saved"));
         MR3Utils.closeModal();
-        MR3Pages.users.render(document.getElementById('mainContent') || document.body); // تحديث الصفحة
+        MR3Pages.users.render(document.getElementById('mainContent') || document.body);
       } catch (error) {
         console.error("Server Error:", error);
-        MR3Utils.toast("error", MR3I18n.t("messages.failed"), MR3I18n.t("messages.errorOccurred"));
+        MR3Utils.toast("error", MR3I18n.t("messages.failed"), error.message || MR3I18n.t("messages.errorOccurred"));
       } finally {
         saveBtn.disabled = false;
       }
@@ -214,7 +227,10 @@
     if (!(await MR3Utils.confirm(MR3I18n.t("messages.confirmDelete")))) return;
     
     try {
-      const response = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+      const response = await fetch(`/api/users/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       if (!response.ok) throw new Error('فشل الحذف');
 
       MR3Utils.toast("success", MR3I18n.t("messages.success"), MR3I18n.t("messages.deleted"));
@@ -228,7 +244,6 @@
   async function toggleUser(id) {
     if (!MR3App.require("users.manage")) return;
     
-    // جلب المستخدمين أولاً لمعرفة الحالة الحالية
     const users = await fetchUsers();
     const user = users.find(u => u.id === id);
     if (!user) return;
@@ -239,10 +254,14 @@
     }
     
     try {
+      // إرسال البيانات المحدثة مع الحفاظ على البيانات القديمة للمستخدم
       const response = await fetch(`/api/users/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active: !user.active })
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          ...user,
+          active: !user.active
+        })
       });
       
       if (!response.ok) throw new Error('فشل التحديث');
@@ -259,11 +278,14 @@
     const users = await fetchUsers();
     
     return `<div class="table-wrap"><table class="data-table"><thead><tr><th>${MR3I18n.t("common.name")}</th><th>${MR3I18n.t("common.email")}</th><th>${MR3I18n.t("common.role")}</th><th>${MR3I18n.t("common.status")}</th><th>${MR3I18n.t("common.actions")}</th></tr></thead><tbody>
-      ${users.map((user) => `<tr data-id="${user.id}"><td>${MR3Utils.escape(user.name)}</td><td>${MR3Utils.escape(user.email)}</td><td>${MR3Utils.badge(user.role === "ADMIN" ? MR3I18n.t("common.admin") : MR3I18n.t("common.user"), user.role === "ADMIN" ? "violet" : "info")}</td><td>${MR3Utils.badge(user.active ? MR3I18n.t("common.active") : MR3I18n.t("common.inactive"), user.active ? "success" : "danger")}</td><td><div class="table-actions">
+      ${users.map((user) => {
+        const isAdmin = String(user.role).toUpperCase() === "ADMIN";
+        return `<tr data-id="${user.id}"><td>${MR3Utils.escape(user.name)}</td><td>${MR3Utils.escape(user.email)}</td><td>${MR3Utils.badge(isAdmin ? MR3I18n.t("common.admin") : MR3I18n.t("common.user"), isAdmin ? "violet" : "info")}</td><td>${MR3Utils.badge(user.active ? MR3I18n.t("common.active") : MR3I18n.t("common.inactive"), user.active ? "success" : "danger")}</td><td><div class="table-actions">
         ${MR3Utils.actionButton("edit", "edit", MR3I18n.t("common.edit"))}
         ${MR3Utils.actionButton("toggle", "refresh", user.active ? MR3I18n.t("common.inactive") : MR3I18n.t("common.active"), "icon-button warning-button")}
         ${MR3Utils.actionButton("delete", "trash", MR3I18n.t("common.delete"), "icon-button danger-button")}
-      </div></td></tr>`).join("")}
+      </div></td></tr>`;
+      }).join("")}
     </tbody></table></div>`;
   }
 
@@ -276,11 +298,10 @@
 
       root.querySelector("#addUser").addEventListener("click", () => openForm());
       
-      // التعديل هنا لجلب البيانات المحدثة عند التعديل
       MR3App.bindTableActions(root, { 
         edit: async (id) => {
-            const users = await fetchUsers();
-            openForm(users.find(u => u.id === id));
+          const users = await fetchUsers();
+          openForm(users.find(u => u.id === id));
         }, 
         delete: deleteUser, 
         toggle: toggleUser 
