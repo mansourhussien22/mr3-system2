@@ -32,7 +32,7 @@
     }, 800);
   }
 
-  // 3) غلاف مركزي فوق fetch
+  // 3) غلاف مركزي فوق fetch بيضيف التوكن تلقائيًا وبيتعامل مع 401
   async function apiFetch(url, options = {}) {
     const response = await fetch(url, {
       ...options,
@@ -63,16 +63,17 @@
     return response;
   }
 
-  // 4) دالة لجلب المستخدمين من السيرفر مع التوكن
+  // 4) دالة لجلب المستخدمين من السيرفر
   async function fetchUsers() {
     try {
       const response = await apiFetch('/api/users');
       if (!response.ok) throw new Error('فشل جلب المستخدمين');
       return await response.json();
     } catch (error) {
-      if (error.message !== "SESSION_EXPIRED") {
-        console.error("Fetch Users Error:", error);
+      if (error.message === "SESSION_EXPIRED") {
+        throw error; // نلقي الخطأ للأعلى لمنع إكمال رسم الجدول
       }
+      console.error("Fetch Users Error:", error);
       return [];
     }
   }
@@ -85,7 +86,6 @@
     if (!normalizedEmail && !normalizedUsername) return false;
 
     return users.some((user) => {
-      // تحويل الـ IDs لملازمة المقارنة النصية السليمة
       if (String(user.id) === String(id)) return false;
       return (
         (normalizedEmail && MR3Utils.normalize(user.email || '') === normalizedEmail) ||
@@ -308,7 +308,6 @@
     }
 
     try {
-      // إرسال الحقول المطلوبة فقط وتجنب إرسال password فارغ
       const payload = {
         name: user.name,
         username: user.username,
@@ -358,21 +357,25 @@
     async render(root) {
       root.innerHTML = MR3App.pageHeader("nav.users", "", `<button id="addUser" class="primary-button">${MR3Utils.icon("plus")}${MR3I18n.t("common.add")}</button>`) + `<section class="panel"><div class="panel-body"><div style="text-align:center; padding: 20px;">جاري تحميل المستخدمين...</div></div></section>`;
 
-      const tableHtml = await table();
-      const panelBody = root.querySelector(".panel-body");
-      if (panelBody) panelBody.innerHTML = tableHtml;
+      try {
+        const tableHtml = await table();
+        const panelBody = root.querySelector(".panel-body");
+        if (panelBody) panelBody.innerHTML = tableHtml;
 
-      const addBtn = root.querySelector("#addUser");
-      if (addBtn) addBtn.addEventListener("click", () => openForm());
+        const addBtn = root.querySelector("#addUser");
+        if (addBtn) addBtn.addEventListener("click", () => openForm());
 
-      MR3App.bindTableActions(root, {
-        edit: async (id) => {
-          const users = await fetchUsers();
-          openForm(users.find(u => String(u.id) === String(id)));
-        },
-        delete: deleteUser,
-        toggle: toggleUser
-      });
+        MR3App.bindTableActions(root, {
+          edit: async (id) => {
+            const users = await fetchUsers();
+            openForm(users.find(u => String(u.id) === String(id)));
+          },
+          delete: deleteUser,
+          toggle: toggleUser
+        });
+      } catch (err) {
+        if (err.message === "SESSION_EXPIRED") return;
+      }
     }
   };
 })();
