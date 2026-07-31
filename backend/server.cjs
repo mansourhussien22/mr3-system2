@@ -231,22 +231,40 @@ function generateToken(user) {
   const signature = crypto.createHmac("sha256", FINAL_JWT_SECRET).update(`${header}.${body}`).digest("base64url");
   return `${header}.${body}.${signature}`;
 }
+
+// معدّل: بترجع { payload, reason } بدل ما ترجع null بس،
+// عشان نقدر نفرّق بين توكن منتهي وتوكن باظ/متلاعب فيه
 function verifyToken(token) {
   const parts = (token || "").split(".");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return { payload: null, reason: "malformed" };
+
   const [header, body, signature] = parts;
   const expectedSig = crypto.createHmac("sha256", FINAL_JWT_SECRET).update(`${header}.${body}`).digest("base64url");
-  const sigBuf = Buffer.from(signature);
-  const expBuf = Buffer.from(expectedSig);
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+
+  let sigBuf, expBuf;
+  try {
+    sigBuf = Buffer.from(signature);
+    expBuf = Buffer.from(expectedSig);
+  } catch {
+    return { payload: null, reason: "malformed" };
+  }
+
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { payload: null, reason: "invalid_signature" };
+  }
+
   let payload;
   try {
     payload = JSON.parse(base64urlDecode(body));
   } catch {
-    return null;
+    return { payload: null, reason: "malformed" };
   }
-  if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
-  return payload;
+
+  if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
+    return { payload: null, reason: "expired" };
+  }
+
+  return { payload, reason: null };
 }
 
 // ------------------------- التعامل مع قاعدة البيانات -------------------------
@@ -350,21 +368,35 @@ function getBearerToken(req) {
   return header.trim();
 }
 
+// معدّل: بيرجع سبب الفشل كمان (لو موجود) عشان requireAuth يقدر يوضحه للفرونت
 async function authenticate(req) {
   const token = getBearerToken(req);
-  const payload = token && verifyToken(token);
-  if (!payload) return { user: null, db: null };
+  if (!token) return { user: null, db: null, reason: "missing_token" };
+
+  const { payload, reason } = verifyToken(token);
+  if (!payload) return { user: null, db: null, reason: reason || "invalid_token" };
 
   const db = await getDb();
   const user = db.users.find((u) => u.id === payload.id);
-  if (user && user.active !== false) return { user, db };
-  return { user: null, db };
+
+  if (!user) return { user: null, db: null, reason: "user_not_found" };
+  if (user.active === false) return { user: null, db: null, reason: "account_deactivated" };
+
+  return { user, db, reason: null };
 }
 
+// معدّل: بيضيف حقل "reason" في رسالة الـ 401 عشان الفرونت يفرّق
+// بين "التوكن انتهى" (لازم يعمل logout تلقائي) و"مفيش توكن أصلاً"
 async function requireAuth(req, res, extraHeaders) {
-  const { user, db } = await authenticate(req);
+  const { user, db, reason } = await authenticate(req);
   if (!user) {
-    await sendJson(req, res, 401, { error: "Unauthorized. Please login." }, extraHeaders);
+    await sendJson(
+      req,
+      res,
+      401,
+      { error: "Unauthorized. Please login.", reason: reason || "unauthorized" },
+      extraHeaders
+    );
     return null;
   }
   return { user, db };
@@ -473,12 +505,12 @@ async function handleApi(req, res, url, extraHeaders) {
         return sendJson(req, res, 409, { error: "اسم المستخدم أو البريد الإلكتروني مسجل بالفعل." }, extraHeaders);
       }
 
-      const passToHash = rawBody.password && String(rawBody.password).trim().length > 0 
-        ? String(rawBody.password) 
+      const passToHash = rawBody.password && String(rawBody.password).trim().length > 0
+        ? String(rawBody.password)
         : "12345678";
-        
+
       const { passwordHash, passwordSalt } = await hashPassword(passToHash);
-      
+
       const newUser = {
         id: makeId("u"),
         username,
@@ -496,7 +528,7 @@ async function handleApi(req, res, url, extraHeaders) {
       db.users.push(newUser);
       recordAudit(db, "USER_CREATED", currentUser, { targetId: newUser.id, username: newUser.username });
       await writeDbRaw(db);
-      
+
       return sendJson(req, res, 201, stripPassword(newUser), extraHeaders);
     }
 
