@@ -206,6 +206,7 @@ function stripPassword(user) {
   if (!user) return user;
   const { passwordHash, passwordSalt, ...rest } = user;
   rest.permissions = Array.isArray(rest.permissions) ? rest.permissions : [];
+  rest.role = String(rest.role || "USER").toUpperCase();
   return rest;
 }
 
@@ -232,8 +233,6 @@ function generateToken(user) {
   return `${header}.${body}.${signature}`;
 }
 
-// معدّل: بترجع { payload, reason } بدل ما ترجع null بس،
-// عشان نقدر نفرّق بين توكن منتهي وتوكن باظ/متلاعب فيه
 function verifyToken(token) {
   const parts = (token || "").split(".");
   if (parts.length !== 3) return { payload: null, reason: "malformed" };
@@ -368,7 +367,6 @@ function getBearerToken(req) {
   return header.trim();
 }
 
-// معدّل: بيرجع سبب الفشل كمان (لو موجود) عشان requireAuth يقدر يوضحه للفرونت
 async function authenticate(req) {
   const token = getBearerToken(req);
   if (!token) return { user: null, db: null, reason: "missing_token" };
@@ -385,8 +383,6 @@ async function authenticate(req) {
   return { user, db, reason: null };
 }
 
-// معدّل: بيضيف حقل "reason" في رسالة الـ 401 عشان الفرونت يفرّق
-// بين "التوكن انتهى" (لازم يعمل logout تلقائي) و"مفيش توكن أصلاً"
 async function requireAuth(req, res, extraHeaders) {
   const { user, db, reason } = await authenticate(req);
   if (!user) {
@@ -483,7 +479,7 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 200, collection === "users" ? stripPassword(item) : item, extraHeaders);
   }
 
-  // 3) POST Create (معالجة مرنة ومصححة للمستخدمين والصلاحيات)
+  // 3) POST Create (إضافة مستخدم أو عنصر مع معالجة التكرار)
   if (req.method === "POST" && !id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
@@ -491,9 +487,9 @@ async function handleApi(req, res, url, extraHeaders) {
         return sendJson(req, res, 403, { error: "Forbidden. Admin rights required." }, extraHeaders);
       }
 
-      const username = rawBody.username || rawBody.userName || (rawBody.email ? rawBody.email.split("@")[0] : `user_${Date.now()}`);
-      const email = rawBody.email || rawBody.userEmail || `${username}@mr3.local`;
-      const name = rawBody.name || rawBody.fullName || username;
+      const username = (rawBody.username || rawBody.userName || (rawBody.email ? rawBody.email.split("@")[0] : `user_${Date.now()}`)).trim();
+      const email = (rawBody.email || rawBody.userEmail || `${username}@mr3.local`).trim();
+      const name = (rawBody.name || rawBody.fullName || username).trim();
       const role = String(rawBody.role || "USER").toUpperCase();
       const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : [];
 
@@ -546,7 +542,7 @@ async function handleApi(req, res, url, extraHeaders) {
     return sendJson(req, res, 201, newItem, extraHeaders);
   }
 
-  // 4) PATCH or PUT Update
+  // 4) PATCH or PUT Update (تعديل مستخدم مع التحقق المتقدم لمنع التكرار مع مستخدمين آخرين)
   if ((req.method === "PATCH" || req.method === "PUT") && id) {
     const rawBody = await readBody(req);
     if (collection === "users") {
@@ -556,11 +552,20 @@ async function handleApi(req, res, url, extraHeaders) {
       const index = db.users.findIndex((u) => u.id === id);
       if (index === -1) return sendJson(req, res, 404, { error: "User not found." }, extraHeaders);
 
-      const username = rawBody.username || rawBody.userName || db.users[index].username;
-      const email = rawBody.email || rawBody.userEmail || db.users[index].email;
-      const name = rawBody.name || rawBody.fullName || db.users[index].name;
+      const username = (rawBody.username || rawBody.userName || db.users[index].username).trim();
+      const email = (rawBody.email || rawBody.userEmail || db.users[index].email).trim();
+      const name = (rawBody.name || rawBody.fullName || db.users[index].name).trim();
       const role = rawBody.role ? String(rawBody.role).toUpperCase() : db.users[index].role;
       const permissions = Array.isArray(rawBody.permissions) ? rawBody.permissions : db.users[index].permissions;
+
+      // التأكد أن الاسم أو الإيميل الجديد مش مستخدم في حساب تاني غير الحساب ده
+      const isDuplicateOther = db.users.some(
+        (u) => u.id !== id && (u.username?.toLowerCase() === username.toLowerCase() || u.email?.toLowerCase() === email.toLowerCase())
+      );
+
+      if (isDuplicateOther) {
+        return sendJson(req, res, 409, { error: "اسم المستخدم أو البريد الإلكتروني مستخدم بالفعل بحساب آخر." }, extraHeaders);
+      }
 
       const updated = {
         ...db.users[index],
